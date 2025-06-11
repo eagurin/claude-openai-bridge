@@ -1,0 +1,192 @@
+# GitHub Action для интеграции claude-openai-bridge с claude-code-action
+#
+# Архитектурное решение:
+# - Использует локальный claude-openai-bridge как API endpoint
+# - Настроен для работы с самостоятельно размещенными раннерами
+# - Поддерживает различные типы событий GitHub
+# - Включает безопасную передачу секретов
+
+name: Claude Code Assistant
+
+# Триггеры для запуска action
+on:
+  # Комментарии в Issues и Pull Requests
+  issue_comment:
+    types: [created]
+  
+  # События Pull Request
+  pull_request:
+    types: [opened, synchronize, reopened]
+  
+  # События Issues
+  issues:
+    types: [opened, edited, labeled]
+
+# Разрешения для работы с GitHub API
+permissions:
+  contents: read          # Чтение содержимого репозитория
+  issues: write          # Создание/обновление комментариев в issues
+  pull-requests: write   # Создание/обновление комментариев в PR
+  checks: read           # Чтение статуса проверок
+
+jobs:
+  claude-assistant:
+    name: Claude Code Assistant
+    
+    # Используем Ubuntu для самостоятельно размещенных раннеров
+    # Альтернативный подход: использовать GitHub-hosted runners
+    runs-on: self-hosted
+    
+    # Условие выполнения - только для комментариев с триггерными фразами
+    if: |
+      (github.event_name == 'issue_comment' && 
+       (contains(github.event.comment.body, '@claude') || 
+        contains(github.event.comment.body, '@ai') ||
+        contains(github.event.comment.body, '/review') ||
+        contains(github.event.comment.body, '/analyze') ||
+        contains(github.event.comment.body, '/help') ||
+        contains(github.event.comment.body, '/fix'))) ||
+      github.event_name == 'pull_request' ||
+      github.event_name == 'issues'
+    
+    steps:
+      # Проверка кода репозитория
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # Получаем полную историю для анализа изменений
+          fetch-depth: 0
+          
+      # Установка Node.js для потенциальных дополнительных скриптов
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          
+      # Проверка доступности claude-openai-bridge
+      - name: Check Claude OpenAI Bridge availability
+        id: check-bridge
+        run: |
+          # Проверяем доступность локального сервера
+          if curl -f http://localhost:8000/health > /dev/null 2>&1; then
+            echo "bridge_available=true" >> $GITHUB_OUTPUT
+            echo "✅ Claude OpenAI Bridge is available"
+          else
+            echo "bridge_available=false" >> $GITHUB_OUTPUT
+            echo "❌ Claude OpenAI Bridge is not available"
+            echo "Please ensure the bridge server is running on port 8000"
+          fi
+          
+      # Запуск claude-openai-bridge если не запущен
+      - name: Start Claude OpenAI Bridge
+        if: steps.check-bridge.outputs.bridge_available != 'true'
+        run: |
+          echo "🚀 Starting Claude OpenAI Bridge..."
+          cd ${{ github.workspace }}
+          
+          # Проверяем наличие Python и зависимостей
+          python3 -c "import fastapi, uvicorn, pydantic" || {
+            echo "Installing Python dependencies..."
+            pip3 install -r requirements.txt
+          }
+          
+          # Запускаем сервер в фоновом режиме
+          nohup python3 src/server.py > bridge.log 2>&1 &
+          echo $! > bridge.pid
+          
+          # Ждем запуска сервера
+          for i in {1..30}; do
+            if curl -f http://localhost:8000/health > /dev/null 2>&1; then
+              echo "✅ Bridge started successfully"
+              break
+            fi
+            echo "Waiting for bridge to start... ($i/30)"
+            sleep 2
+          done
+          
+      # Основной step с claude-code-action
+      - name: Run Claude Code Action
+        uses: anthropics/claude-code-action@v1
+        with:
+          # Конфигурация для использования локального bridge
+          claude_api_base: 'http://localhost:8000/v1'
+          model: 'claude-3-5-sonnet-20241022'
+          
+          # Настройки для GitHub интеграции
+          max_conversation_turns: 5
+          
+          # Включение инструментов для анализа кода
+          enable_file_editing: true
+          enable_code_execution: false  # Отключено для безопасности
+          
+          # Кастомный промпт для контекста
+          system_prompt: |
+            You are Claude, an AI assistant integrated with GitHub via claude-openai-bridge.
+            
+            Repository: ${{ github.repository }}
+            Event: ${{ github.event_name }}
+            
+            Guidelines:
+            - Provide helpful, accurate, and constructive feedback
+            - Format responses in GitHub Markdown
+            - Be concise but thorough in code reviews
+            - Suggest specific improvements with examples
+            - Focus on code quality, security, and best practices
+            
+            Context:
+            - This response will be posted as a GitHub comment
+            - You have access to repository files and PR diffs
+            - Use appropriate tone for collaborative development
+            
+        env:
+          # GitHub токен для API доступа
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
+          # Дополнительные переменные окружения
+          ANTHROPIC_API_KEY: ''  # Не нужен для Claude Code MAX
+          
+          # Настройки для claude-openai-bridge
+          BRIDGE_ENDPOINT: 'http://localhost:8000'
+          
+      # Очистка после выполнения
+      - name: Cleanup
+        if: always()
+        run: |
+          # Останавливаем bridge если мы его запускали
+          if [ -f bridge.pid ]; then
+            echo "🛑 Stopping Claude OpenAI Bridge..."
+            kill $(cat bridge.pid) 2>/dev/null || true
+            rm -f bridge.pid bridge.log
+          fi
+
+  # Дополнительный job для мониторинга
+  monitoring:
+    name: Integration Monitoring
+    runs-on: self-hosted
+    if: always()
+    needs: claude-assistant
+    
+    steps:
+      - name: Report Integration Status
+        run: |
+          echo "📊 Claude OpenAI Bridge Integration Report"
+          echo "Event: ${{ github.event_name }}"
+          echo "Repository: ${{ github.repository }}"
+          echo "Triggered by: ${{ github.actor }}"
+          echo "Status: ${{ needs.claude-assistant.result }}"
+          
+          # Проверяем логи bridge если доступны
+          if [ -f bridge.log ]; then
+            echo "📝 Bridge Logs (last 20 lines):"
+            tail -20 bridge.log
+          fi
+          
+          # Отправляем статистику в webhook (опционально)
+          curl -X POST "${{ secrets.MONITORING_WEBHOOK_URL }}" \
+            -H "Content-Type: application/json" \
+            -d '{
+              "repository": "${{ github.repository }}",
+              "event": "${{ github.event_name }}",
+              "status": "${{ needs.claude-assistant.result }}",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }' || echo "Monitoring webhook not configured"

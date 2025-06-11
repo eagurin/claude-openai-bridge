@@ -22,12 +22,15 @@ import asyncio
 import json
 import time
 import uuid
+import hmac
+import hashlib
+import os
 from datetime import datetime
 from typing import Dict, Any, List, Optional, AsyncGenerator, Union
 
-from fastapi import FastAPI, HTTPException, Request, Body
+from fastapi import FastAPI, HTTPException, Request, Body, Header
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 import uvicorn
 
@@ -66,7 +69,11 @@ CONFIG: Dict[str, Any] = {
     "supports_embeddings": True,
     "price_per_1k_input": 0.003,
     "price_per_1k_output": 0.015,
-    "no_api_key_required": True  # Claude Code MAX doesn't need ANTHROPIC_API_KEY
+    "no_api_key_required": True,  # Claude Code MAX doesn't need ANTHROPIC_API_KEY
+    # GitHub Integration Settings
+    "github_webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
+    "github_integration_enabled": True,
+    "require_webhook_signature": True  # Можно отключить для тестирования
 }
 
 # OpenAI API модели
@@ -159,6 +166,83 @@ class EmbeddingResponse(BaseModel):
     data: List[EmbeddingData]
     model: str
     usage: EmbeddingUsage
+
+# GitHub Integration Models
+class GitHubUser(BaseModel):
+    """GitHub пользователь"""
+    login: str
+    id: int
+    avatar_url: Optional[str] = None
+    html_url: Optional[str] = None
+
+class GitHubRepository(BaseModel):
+    """GitHub репозиторий"""
+    id: int
+    name: str
+    full_name: str
+    html_url: str
+    default_branch: str = "main"
+    private: bool = False
+
+class GitHubComment(BaseModel):
+    """GitHub комментарий"""
+    id: int
+    body: str
+    user: GitHubUser
+    created_at: str
+    updated_at: str
+    html_url: str
+
+class GitHubPullRequest(BaseModel):
+    """GitHub Pull Request"""
+    id: int
+    number: int
+    title: str
+    body: Optional[str] = None
+    state: str
+    user: GitHubUser
+    base: Dict[str, Any]
+    head: Dict[str, Any]
+    html_url: str
+    diff_url: str
+    patch_url: str
+
+class GitHubIssue(BaseModel):
+    """GitHub Issue"""
+    id: int
+    number: int
+    title: str
+    body: Optional[str] = None
+    state: str
+    user: GitHubUser
+    html_url: str
+    labels: List[Dict[str, Any]] = []
+
+class GitHubWebhookPayload(BaseModel):
+    """GitHub webhook payload базовая модель"""
+    action: str
+    repository: GitHubRepository
+    sender: GitHubUser
+    # Опциональные поля в зависимости от типа события
+    comment: Optional[GitHubComment] = None
+    pull_request: Optional[GitHubPullRequest] = None
+    issue: Optional[GitHubIssue] = None
+
+class GitHubActionContext(BaseModel):
+    """Контекст для GitHub Action обработки"""
+    event_type: str = Field(..., description="Тип события: issue_comment, pull_request, issues")
+    action: str = Field(..., description="Действие: created, opened, synchronize")
+    repository: GitHubRepository
+    sender: GitHubUser
+    # Основной контент для анализа
+    content: str = Field(..., description="Текст комментария или описания")
+    # Метаданные
+    pr_number: Optional[int] = None
+    issue_number: Optional[int] = None
+    comment_id: Optional[int] = None
+    # Дополнительная информация
+    diff_content: Optional[str] = None
+    file_changes: Optional[List[str]] = None
 
 # Claude Bridge адаптер
 class ClaudeBridgeAdapter:
@@ -371,9 +455,630 @@ class EmbeddingAdapter:
             logger.error(f"Ошибка выполнения embeddings через Claude: {e}")
             raise HTTPException(status_code=500, detail=str(e))
 
+# GitHub Action адаптер
+class GitHubActionAdapter:
+    """
+    Адаптер для интеграции с GitHub Actions и claude-code-action
+    
+    Основные возможности:
+    - Обработка GitHub webhook событий
+    - Конвертация контекста PR/Issue в промпт для Claude
+    - Генерация ответов в формате GitHub комментариев
+    - Извлечение diff информации для анализа кода
+    """
+    
+    def __init__(self, claude_adapter: ClaudeBridgeAdapter):
+        self.claude_adapter = claude_adapter
+        self.trigger_phrases = [
+            "@claude", "@ai", "/review", "/analyze", "/help", "/fix"
+        ]
+    
+    def should_respond(self, content: str) -> bool:
+        """
+        Определяет, должен ли бот отвечать на комментарий
+        
+        Обоснование решения:
+        - Проверяем наличие триггерных фраз для избежания спама
+        - Позволяем настраивать триггеры через конфигурацию
+        """
+        content_lower = content.lower()
+        return any(phrase in content_lower for phrase in self.trigger_phrases)
+    
+    async def process_webhook(self, payload: GitHubWebhookPayload) -> GitHubActionContext:
+        """
+        Преобразует GitHub webhook в контекст для обработки
+        
+        Архитектурное решение:
+        - Единая точка входа для всех типов событий
+        - Нормализация данных в универсальный контекст
+        - Поддержка расширения для новых типов событий
+        """
+        context = GitHubActionContext(
+            event_type="unknown",
+            action=payload.action,
+            repository=payload.repository,
+            sender=payload.sender,
+            content=""
+        )
+        
+        # Обработка комментариев в PR или Issue
+        if payload.comment:
+            context.content = payload.comment.body
+            context.comment_id = payload.comment.id
+            context.event_type = "issue_comment"
+            
+            # Если комментарий в PR, добавляем PR контекст
+            if payload.pull_request:
+                context.pr_number = payload.pull_request.number
+                context.event_type = "pull_request_comment"
+                # Получаем diff для анализа кода
+                context.diff_content = await self._fetch_pr_diff(payload.pull_request)
+        
+        # Обработка открытия/обновления PR
+        elif payload.pull_request:
+            context.content = f"PR: {payload.pull_request.title}\n\n{payload.pull_request.body or ''}"
+            context.pr_number = payload.pull_request.number
+            context.event_type = "pull_request"
+            context.diff_content = await self._fetch_pr_diff(payload.pull_request)
+        
+        # Обработка Issues
+        elif payload.issue:
+            context.content = f"Issue: {payload.issue.title}\n\n{payload.issue.body or ''}"
+            context.issue_number = payload.issue.number
+            context.event_type = "issues"
+        
+        return context
+    
+    async def _fetch_pr_diff(self, pr: GitHubPullRequest) -> Optional[str]:
+        """
+        Получает diff для PR через GitHub API
+        
+        Реализованные подходы:
+        1. Прямой запрос к GitHub API для получения diff
+        2. Обработка ошибок и fallback
+        3. Ограничение размера diff для оптимизации
+        
+        Args:
+            pr: GitHubPullRequest объект с метаданными
+            
+        Returns:
+            str: Diff в унифицированном формате или None при ошибке
+        """
+        try:
+            import httpx
+            
+            # Используем GitHub API для получения diff
+            async with httpx.AsyncClient() as client:
+                headers = {
+                    "Accept": "application/vnd.github.v3.diff",
+                    "User-Agent": "claude-openai-bridge/1.0"
+                }
+                
+                # Добавляем токен если доступен через переменную окружения
+                github_token = os.getenv("GITHUB_TOKEN")
+                if github_token:
+                    headers["Authorization"] = f"token {github_token}"
+                
+                response = await client.get(pr.diff_url, headers=headers)
+                
+                if response.status_code == 200:
+                    diff_content = response.text
+                    
+                    # Ограничиваем размер diff для производительности
+                    max_diff_size = 10000  # 10KB максимум
+                    if len(diff_content) > max_diff_size:
+                        diff_content = diff_content[:max_diff_size] + "\n\n... (diff truncated for performance)"
+                    
+                    return diff_content
+                else:
+                    logger.warning(f"Failed to fetch PR diff: {response.status_code}")
+                    return f"# Could not fetch diff for PR #{pr.number} (Status: {response.status_code})"
+                    
+        except Exception as e:
+            logger.error(f"Error fetching PR diff: {e}")
+            return f"# Error fetching diff for PR #{pr.number}: {str(e)}"
+    
+    async def create_response(self, context: GitHubActionContext) -> Dict[str, Any]:
+        """
+        Генерирует ответ на основе GitHub контекста
+        
+        Дизайн решения:
+        - Специализированные промпты для разных типов событий
+        - Включение релевантного контекста (diff, PR info)
+        - Форматирование ответа для GitHub Markdown
+        """
+        # Построение контекстного промпта
+        prompt_parts = []
+        
+        # Системный контекст
+        system_context = self._build_system_context(context)
+        prompt_parts.append(f"System: {system_context}")
+        
+        # Основной контент
+        prompt_parts.append(f"User: {context.content}")
+        
+        # Добавляем diff если доступен
+        if context.diff_content:
+            prompt_parts.append(f"Code diff:\n```diff\n{context.diff_content}\n```")
+        
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        # Создаем фиктивный запрос для Claude адаптера
+        mock_request = ChatCompletionRequest(
+            model=CONFIG["default_model"],
+            messages=[
+                ChatMessage(role="system", content=system_context),
+                ChatMessage(role="user", content=context.content)
+            ]
+        )
+        
+        # Получаем ответ от Claude
+        result = await self.claude_adapter.execute_claude_request(full_prompt, mock_request)
+        
+        return {
+            "response": result["response"],
+            "context": context.model_dump(),
+            "metadata": result.get("metadata", {})
+        }
+    
+    def _build_system_context(self, context: GitHubActionContext) -> str:
+        """
+        Строит системный промпт в зависимости от типа события
+        
+        Обоснование подхода:
+        - Специализированные инструкции для разных сценариев
+        - Включение метаданных репозитория для контекста
+        - Указания по форматированию для GitHub
+        """
+        base_context = f"""You are an AI assistant integrated with GitHub via claude-code-action.
+Repository: {context.repository.full_name}
+Event: {context.event_type} - {context.action}
+User: @{context.sender.login}
+
+Format your response in GitHub Markdown. Be helpful, concise, and professional."""
+        
+        if context.event_type == "pull_request_comment":
+            return base_context + f"""
+
+This is a comment on Pull Request #{context.pr_number}. 
+You have access to the PR diff and can provide code review, suggestions, or answer questions about the changes."""
+        
+        elif context.event_type == "pull_request":
+            return base_context + f"""
+
+This is about Pull Request #{context.pr_number}. 
+Analyze the PR title, description, and code changes. Provide constructive feedback."""
+        
+        elif context.event_type == "issues":
+            return base_context + f"""
+
+This is about Issue #{context.issue_number}.
+Help understand the problem, suggest solutions, or provide relevant information."""
+        
+        return base_context
+
+# GitHub Security Functions
+def verify_github_signature(payload_body: bytes, signature_header: str, secret: str) -> bool:
+    """
+    Проверяет подпись GitHub webhook для безопасности
+    
+    Обоснование подхода безопасности:
+    - Использование HMAC-SHA256 согласно стандарту GitHub
+    - Сравнение подписей с использованием constant-time comparison
+    - Обязательная проверка формата заголовка
+    
+    Args:
+        payload_body: Тело webhook запроса в bytes
+        signature_header: Заголовок X-Hub-Signature-256
+        secret: Секретный ключ webhook
+    
+    Returns:
+        bool: True если подпись корректна
+    """
+    if not signature_header:
+        return False
+    
+    # GitHub отправляет подпись в формате "sha256=<hash>"
+    if not signature_header.startswith('sha256='):
+        return False
+    
+    received_signature = signature_header[7:]  # Убираем "sha256="
+    
+    # Вычисляем ожидаемую подпись
+    expected_signature = hmac.new(
+        secret.encode('utf-8'),
+        payload_body,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Используем constant-time comparison для защиты от timing attacks
+    return hmac.compare_digest(received_signature, expected_signature)
+
+def extract_github_event_type(headers: Dict[str, str]) -> str:
+    """
+    Извлекает тип события из заголовков GitHub webhook
+    
+    Возможные типы событий:
+    - issue_comment: Комментарий в Issue или PR
+    - pull_request: События PR (открытие, изменение)
+    - issues: События с Issues
+    - push: Коммиты в репозиторий
+    """
+    return headers.get('x-github-event', 'unknown')
+
 # Глобальные адаптеры
 bridge_adapter = ClaudeBridgeAdapter(bridge_path=CONFIG["claude_bridge_path"])
 embedding_adapter = EmbeddingAdapter(bridge_path=CONFIG["claude_bridge_path"])
+github_adapter = GitHubActionAdapter(claude_adapter=bridge_adapter)
+
+# GitHub Integration Endpoints
+@app.post("/github/webhook")
+async def handle_github_webhook(
+    request: Request,
+    x_github_event: str = Header(None),
+    x_hub_signature_256: str = Header(None),
+    x_github_delivery: str = Header(None)
+) -> JSONResponse:
+    """
+    Обрабатывает GitHub webhook события
+    
+    Архитектурное решение:
+    - Отдельный endpoint для GitHub интеграции
+    - Полная валидация безопасности перед обработкой
+    - Асинхронная обработка для быстрого ответа GitHub
+    - Подробное логирование для отладки
+    
+    Поддерживаемые события:
+    - issue_comment: Комментарии в Issues/PR
+    - pull_request: События Pull Request
+    - issues: События Issues
+    
+    Returns:
+        JSONResponse: Статус обработки и результат
+    """
+    try:
+        # Получаем тело запроса
+        body = await request.body()
+        
+        # Проверяем включена ли GitHub интеграция
+        if not CONFIG["github_integration_enabled"]:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "GitHub integration is disabled"}
+            )
+        
+        # Проверяем подпись если требуется
+        if CONFIG["require_webhook_signature"]:
+            webhook_secret = CONFIG["github_webhook_secret"]
+            if not webhook_secret:
+                logger.error("GitHub webhook secret not configured")
+                return JSONResponse(
+                    status_code=500,
+                    content={"error": "Webhook secret not configured"}
+                )
+            
+            if not verify_github_signature(body, x_hub_signature_256 or "", webhook_secret):
+                logger.warning(f"Invalid GitHub webhook signature from {request.client}")
+                return JSONResponse(
+                    status_code=401,
+                    content={"error": "Invalid signature"}
+                )
+        
+        # Парсим JSON payload
+        try:
+            payload_data = json.loads(body.decode('utf-8'))
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON in webhook payload: {e}")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid JSON payload"}
+            )
+        
+        # Логируем событие
+        logger.info(f"GitHub webhook: {x_github_event} from {payload_data.get('repository', {}).get('full_name', 'unknown')}")
+        
+        # Фильтруем поддерживаемые события
+        supported_events = ["issue_comment", "pull_request", "issues"]
+        if x_github_event not in supported_events:
+            logger.info(f"Ignoring unsupported event: {x_github_event}")
+            return JSONResponse(
+                status_code=200,
+                content={"message": f"Event {x_github_event} ignored"}
+            )
+        
+        # Валидируем и парсим payload
+        try:
+            webhook_payload = GitHubWebhookPayload(**payload_data)
+        except ValidationError as e:
+            logger.error(f"Invalid webhook payload structure: {e}")
+            return JSONResponse(
+                status_code=400,
+                content={"error": "Invalid payload structure", "details": e.errors()}
+            )
+        
+        # Обрабатываем webhook через GitHub адаптер
+        context = await github_adapter.process_webhook(webhook_payload)
+        
+        # Проверяем нужно ли отвечать (для комментариев)
+        if webhook_payload.comment and not github_adapter.should_respond(context.content):
+            logger.info("Comment doesn't contain trigger phrases, ignoring")
+            return JSONResponse(
+                status_code=200,
+                content={"message": "No trigger phrases found, ignoring"}
+            )
+        
+        # Генерируем ответ через Claude
+        response_data = await github_adapter.create_response(context)
+        
+        logger.info(f"Generated response for {x_github_event} in {context.repository.full_name}")
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": "Webhook processed successfully",
+                "event_type": x_github_event,
+                "repository": context.repository.full_name,
+                "response_length": len(response_data["response"]),
+                "context": {
+                    "pr_number": context.pr_number,
+                    "issue_number": context.issue_number,
+                    "comment_id": context.comment_id
+                }
+            }
+        )
+        
+    except Exception as e:
+        logger.error(f"Error processing GitHub webhook: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Internal server error", "details": str(e)}
+        )
+
+@app.get("/github/status")
+async def github_integration_status() -> Dict[str, Any]:
+    """
+    Возвращает статус GitHub интеграции
+    
+    Полезно для:
+    - Проверки конфигурации
+    - Диагностики проблем
+    - Мониторинга состояния
+    """
+    return {
+        "github_integration_enabled": CONFIG["github_integration_enabled"],
+        "webhook_secret_configured": bool(CONFIG["github_webhook_secret"]),
+        "require_signature_verification": CONFIG["require_webhook_signature"],
+        "supported_events": ["issue_comment", "pull_request", "issues"],
+        "trigger_phrases": github_adapter.trigger_phrases,
+        "claude_adapter_ready": bridge_adapter is not None
+    }
+
+@app.post("/github/analyze")
+async def analyze_github_content(
+    request: GitHubActionContext
+) -> Dict[str, Any]:
+    """
+    Анализирует GitHub контент напрямую (без webhook)
+    
+    Полезно для:
+    - Тестирования интеграции
+    - Прямого вызова из GitHub Action
+    - Кастомных сценариев анализа
+    """
+    try:
+        response_data = await github_adapter.create_response(request)
+        
+        return {
+            "success": True,
+            "response": response_data["response"],
+            "context": response_data["context"],
+            "metadata": response_data["metadata"]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error analyzing GitHub content: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/github/comment")
+async def post_github_comment(
+    repo_full_name: str,
+    issue_number: int,
+    comment_body: str,
+    github_token: str = Header(..., alias="X-GitHub-Token")
+) -> Dict[str, Any]:
+    """
+    Отправляет комментарий в GitHub Issue или PR
+    
+    Архитектурное решение:
+    - Прямая интеграция с GitHub API
+    - Безопасная передача токена через заголовок
+    - Валидация всех параметров
+    
+    Альтернативные подходы:
+    1. Использование GitHub App вместо токена
+    2. Интеграция через GraphQL API
+    3. Batch операции для множественных комментариев
+    """
+    try:
+        import httpx
+        
+        # GitHub API endpoint
+        url = f"https://api.github.com/repos/{repo_full_name}/issues/{issue_number}/comments"
+        
+        headers = {
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "body": comment_body
+        }
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, headers=headers, json=payload)
+            
+            if response.status_code == 201:
+                comment_data = response.json()
+                return {
+                    "success": True,
+                    "comment_id": comment_data["id"],
+                    "html_url": comment_data["html_url"],
+                    "message": "Comment posted successfully"
+                }
+            else:
+                logger.error(f"GitHub API error: {response.status_code} - {response.text}")
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"GitHub API error: {response.text}"
+                )
+                
+    except Exception as e:
+        logger.error(f"Error posting GitHub comment: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/github/repository/{owner}/{repo}")
+async def get_repository_info(
+    owner: str,
+    repo: str,
+    github_token: str = Header(None, alias="X-GitHub-Token")
+) -> Dict[str, Any]:
+    """
+    Получает информацию о репозитории
+    
+    Используется для:
+    - Получения метаданных репозитория
+    - Проверки доступности
+    - Извлечения настроек и конфигурации
+    """
+    try:
+        import httpx
+        
+        url = f"https://api.github.com/repos/{owner}/{repo}"
+        headers = {}
+        
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
+        headers["Accept"] = "application/vnd.github.v3+json"
+        
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers)
+            
+            if response.status_code == 200:
+                repo_data = response.json()
+                return {
+                    "success": True,
+                    "repository": {
+                        "id": repo_data["id"],
+                        "name": repo_data["name"],
+                        "full_name": repo_data["full_name"],
+                        "description": repo_data.get("description"),
+                        "language": repo_data.get("language"),
+                        "default_branch": repo_data["default_branch"],
+                        "private": repo_data["private"],
+                        "topics": repo_data.get("topics", []),
+                        "html_url": repo_data["html_url"]
+                    }
+                }
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Repository not found or access denied"
+                )
+                
+    except Exception as e:
+        logger.error(f"Error getting repository info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/github/pull/{owner}/{repo}/{pull_number}")
+async def get_pull_request_info(
+    owner: str,
+    repo: str,
+    pull_number: int,
+    github_token: str = Header(None, alias="X-GitHub-Token"),
+    include_diff: bool = False
+) -> Dict[str, Any]:
+    """
+    Получает детальную информацию о Pull Request
+    
+    Особенности реализации:
+    - Опциональное включение diff для анализа кода
+    - Извлечение списка измененных файлов
+    - Метаданные для контекстного анализа
+    """
+    try:
+        import httpx
+        
+        base_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pull_number}"
+        headers = {}
+        
+        if github_token:
+            headers["Authorization"] = f"token {github_token}"
+        headers["Accept"] = "application/vnd.github.v3+json"
+        
+        async with httpx.AsyncClient() as client:
+            # Получаем основную информацию о PR
+            pr_response = await client.get(base_url, headers=headers)
+            
+            if pr_response.status_code != 200:
+                raise HTTPException(
+                    status_code=pr_response.status_code,
+                    detail="Pull request not found"
+                )
+            
+            pr_data = pr_response.json()
+            result = {
+                "success": True,
+                "pull_request": {
+                    "id": pr_data["id"],
+                    "number": pr_data["number"],
+                    "title": pr_data["title"],
+                    "body": pr_data.get("body"),
+                    "state": pr_data["state"],
+                    "user": {
+                        "login": pr_data["user"]["login"],
+                        "id": pr_data["user"]["id"]
+                    },
+                    "base": pr_data["base"],
+                    "head": pr_data["head"],
+                    "html_url": pr_data["html_url"],
+                    "diff_url": pr_data["diff_url"],
+                    "patch_url": pr_data["patch_url"],
+                    "created_at": pr_data["created_at"],
+                    "updated_at": pr_data["updated_at"]
+                }
+            }
+            
+            # Получаем список файлов
+            files_response = await client.get(f"{base_url}/files", headers=headers)
+            if files_response.status_code == 200:
+                files_data = files_response.json()
+                result["files"] = [
+                    {
+                        "filename": file["filename"],
+                        "status": file["status"],
+                        "additions": file["additions"],
+                        "deletions": file["deletions"],
+                        "changes": file["changes"],
+                        "patch": file.get("patch") if include_diff else None
+                    }
+                    for file in files_data
+                ]
+            
+            # Получаем diff если запрошен
+            if include_diff:
+                diff_headers = headers.copy()
+                diff_headers["Accept"] = "application/vnd.github.v3.diff"
+                
+                diff_response = await client.get(base_url, headers=diff_headers)
+                if diff_response.status_code == 200:
+                    result["diff"] = diff_response.text
+            
+            return result
+            
+    except Exception as e:
+        logger.error(f"Error getting pull request info: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # API Endpoints
 @app.get("/v1/models")

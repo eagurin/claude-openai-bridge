@@ -1,0 +1,210 @@
+# Локальная интеграция для разработки и тестирования
+#
+# Этот workflow предназначен для:
+# - Локального тестирования интеграции
+# - Разработки и отладки
+# - Демонстрации возможностей
+
+name: Local Development Integration
+
+# Ручной запуск для тестирования
+on:
+  workflow_dispatch:
+    inputs:
+      test_scenario:
+        description: 'Test scenario to run'
+        required: true
+        default: 'basic'
+        type: choice
+        options:
+        - basic
+        - pr_review
+        - issue_analysis
+        - code_suggestions
+      
+      model_selection:
+        description: 'Claude model to use'
+        required: false
+        default: 'claude-3-5-sonnet-20241022'
+        type: choice
+        options:
+        - claude-3-5-sonnet-20241022
+        - claude-3-5-haiku-20241022
+        - claude-3-opus-20240229
+
+env:
+  BRIDGE_URL: http://localhost:8000
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  setup:
+    name: Setup Test Environment
+    runs-on: ubuntu-latest
+    
+    outputs:
+      bridge-ready: ${{ steps.bridge-check.outputs.ready }}
+      
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+          
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          
+      - name: Start Claude OpenAI Bridge
+        run: |
+          echo "🚀 Starting Claude OpenAI Bridge for testing..."
+          python src/server.py &
+          BRIDGE_PID=$!
+          echo $BRIDGE_PID > bridge.pid
+          
+          # Ждем готовности сервера
+          for i in {1..30}; do
+            if curl -f $BRIDGE_URL/health > /dev/null 2>&1; then
+              echo "✅ Bridge is ready"
+              break
+            fi
+            echo "Waiting for bridge... ($i/30)"
+            sleep 2
+          done
+          
+      - name: Verify bridge status
+        id: bridge-check
+        run: |
+          if curl -f $BRIDGE_URL/github/status > /dev/null 2>&1; then
+            echo "ready=true" >> $GITHUB_OUTPUT
+            echo "✅ Bridge GitHub integration is ready"
+          else
+            echo "ready=false" >> $GITHUB_OUTPUT
+            echo "❌ Bridge GitHub integration failed"
+          fi
+
+  test-basic:
+    name: Basic Integration Test
+    runs-on: ubuntu-latest
+    needs: setup
+    if: github.event.inputs.test_scenario == 'basic' && needs.setup.outputs.bridge-ready == 'true'
+    
+    steps:
+      - name: Test OpenAI compatibility
+        run: |
+          echo "🧪 Testing OpenAI API compatibility..."
+          
+          # Тест chat completions
+          curl -X POST $BRIDGE_URL/v1/chat/completions \
+            -H "Content-Type: application/json" \
+            -d '{
+              "model": "${{ github.event.inputs.model_selection }}",
+              "messages": [
+                {"role": "user", "content": "Hello from GitHub Actions! This is a test of claude-openai-bridge integration."}
+              ],
+              "max_tokens": 100
+            }' | jq .
+            
+      - name: Test GitHub webhook simulation
+        run: |
+          echo "🔗 Testing GitHub webhook processing..."
+          
+          # Симулируем issue comment webhook
+          curl -X POST $BRIDGE_URL/github/webhook \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: issue_comment" \
+            -d '{
+              "action": "created",
+              "comment": {
+                "id": 123,
+                "body": "@claude please help me understand this code",
+                "user": {"login": "test-user", "id": 1},
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "html_url": "https://github.com/test/repo/issues/1#issuecomment-123"
+              },
+              "repository": {
+                "id": 1,
+                "name": "test-repo",
+                "full_name": "test/repo",
+                "html_url": "https://github.com/test/repo",
+                "default_branch": "main",
+                "private": false
+              },
+              "sender": {"login": "test-user", "id": 1}
+            }' | jq .
+
+  test-pr-review:
+    name: PR Review Test
+    runs-on: ubuntu-latest
+    needs: setup
+    if: github.event.inputs.test_scenario == 'pr_review' && needs.setup.outputs.bridge-ready == 'true'
+    
+    steps:
+      - name: Simulate PR comment
+        run: |
+          echo "📝 Testing PR review capabilities..."
+          
+          curl -X POST $BRIDGE_URL/github/webhook \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: issue_comment" \
+            -d '{
+              "action": "created",
+              "comment": {
+                "id": 456,
+                "body": "/review please check this implementation for security issues",
+                "user": {"login": "developer", "id": 2},
+                "created_at": "2024-01-01T00:00:00Z",
+                "updated_at": "2024-01-01T00:00:00Z",
+                "html_url": "https://github.com/test/repo/pull/1#issuecomment-456"
+              },
+              "pull_request": {
+                "id": 100,
+                "number": 1,
+                "title": "Add user authentication",
+                "body": "This PR adds basic user authentication with JWT tokens",
+                "state": "open",
+                "user": {"login": "developer", "id": 2},
+                "base": {"ref": "main"},
+                "head": {"ref": "feature/auth"},
+                "html_url": "https://github.com/test/repo/pull/1",
+                "diff_url": "https://github.com/test/repo/pull/1.diff",
+                "patch_url": "https://github.com/test/repo/pull/1.patch"
+              },
+              "repository": {
+                "id": 1,
+                "name": "test-repo", 
+                "full_name": "test/repo",
+                "html_url": "https://github.com/test/repo",
+                "default_branch": "main",
+                "private": false
+              },
+              "sender": {"login": "developer", "id": 2}
+            }' | jq .
+
+  cleanup:
+    name: Cleanup Test Environment
+    runs-on: ubuntu-latest
+    needs: [setup, test-basic, test-pr-review]
+    if: always()
+    
+    steps:
+      - name: Stop bridge server
+        run: |
+          if [ -f bridge.pid ]; then
+            echo "🛑 Stopping Claude OpenAI Bridge..."
+            kill $(cat bridge.pid) 2>/dev/null || true
+            rm -f bridge.pid
+          fi
+          
+      - name: Report test results
+        run: |
+          echo "📊 Test Results Summary"
+          echo "========================"
+          echo "Setup: ${{ needs.setup.result }}"
+          echo "Basic Test: ${{ needs.test-basic.result }}"
+          echo "PR Review Test: ${{ needs.test-pr-review.result }}"
+          echo "Test Scenario: ${{ github.event.inputs.test_scenario }}"
+          echo "Model Used: ${{ github.event.inputs.model_selection }}"

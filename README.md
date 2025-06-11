@@ -49,6 +49,7 @@ python src/server.py
 ```
 
 The server starts on `http://localhost:8000` with:
+
 - Interactive API docs: `/docs`
 - OpenAPI schema: `/openapi.json`
 - Health check: `/health`
@@ -56,6 +57,7 @@ The server starts on `http://localhost:8000` with:
 ## API Reference
 
 ### Base URL
+
 ```
 http://localhost:8000/v1
 ```
@@ -86,6 +88,7 @@ curl -X POST http://localhost:8000/v1/chat/completions \
 ```
 
 **Response:**
+
 ```json
 {
   "id": "chatcmpl-123",
@@ -167,6 +170,7 @@ Add to Cursor settings:
 ### Cline
 
 Configure Cline with:
+
 - **API Base:** `http://localhost:8000/v1`
 - **API Key:** `dummy` (any non-empty string)
 - **Model:** `claude-3-5-sonnet-20241022`
@@ -217,6 +221,7 @@ const completion = await openai.chat.completions.create({
 ### Supported Models
 
 #### Chat Models
+
 - `claude-3-5-sonnet-20241022` (recommended)
 - `claude-3-5-haiku-20241022`
 - `claude-3-opus-20240229`
@@ -224,6 +229,7 @@ const completion = await openai.chat.completions.create({
 - `claude-3-haiku-20240307`
 
 #### Embedding Models
+
 - `text-embedding-3-small`
 - `text-embedding-3-large`
 - `text-embedding-ada-002`
@@ -253,6 +259,7 @@ const completion = await openai.chat.completions.create({
 ### Troubleshooting
 
 #### Server Won't Start
+
 ```bash
 # Check if port is in use
 lsof -i :8000
@@ -263,6 +270,7 @@ claude "test message"
 ```
 
 #### Authentication Issues
+
 ```bash
 # Verify Claude Code MAX subscription
 claude --help
@@ -299,6 +307,7 @@ pytest tests/ -v
 ### API Documentation
 
 Interactive documentation available at:
+
 - **Swagger UI:** `http://localhost:8000/docs`
 - **ReDoc:** `http://localhost:8000/redoc`
 - **OpenAPI Schema:** `http://localhost:8000/openapi.json`
