@@ -2,11 +2,9 @@
 # -*- coding: utf-8 -*-
 """
 Claude OpenAI Server - OpenAI-compatible API for Claude Code MAX
-NO ANTHROPIC_API_KEY REQUIRED - Uses Claude Code MAX subscription exclusively!
 
 Features:
 - OpenAI Chat Completions API compatibility
-- Claude Code MAX backend integration (no API key needed)
 - Real-time streaming support
 - Vision capabilities (images)
 - Computer use support
@@ -41,7 +39,7 @@ logger = logging.getLogger("claude_openai_server")
 
 app = FastAPI(
     title="Claude OpenAI Server",
-    description="OpenAI-compatible API for Claude Code MAX - No API key required!",
+    description="OpenAI-compatible API for Claude Code MAX",
     version="2.1.0"
 )
 
@@ -784,20 +782,17 @@ async def get_model_info(model_id: str) -> Dict[str, Any]:
 def main() -> None:
     """Главная функция запуска сервера"""
     
-    print("🚀 Launching Claude OpenAI Server...")
-    print("🔥 CLAUDE CODE MAX EXCLUSIVE - NO API KEY REQUIRED!")
-    print("📡 OpenAI-compatible API for Claude Code MAX subscription")
+    print("🚀 Claude OpenAI Server")
+    print("📡 OpenAI-compatible API for Claude Code MAX")
     print("🤖 Cline/Roo/Cursor compatibility: ✅")
     print("👁️ Vision support: ✅")
     print("💻 Computer use: ✅")
     print("⚡ Streaming: ✅")
     print("🧠 Embeddings API: ✅")
-    print("❌ ANTHROPIC_API_KEY: NOT NEEDED!")
     
-    print(f"\n🌐 Server will start on: http://localhost:8000")
+    print(f"\n🌐 Server: http://localhost:8000")
     print(f"📚 API docs: http://localhost:8000/docs")
-    print(f"❤️ Health check: http://localhost:8000/health")
-    print("\n💡 Make sure your Claude Code MAX subscription is active!")
+    print(f"❤️ Health: http://localhost:8000/health")
     
     uvicorn.run(
         app,
