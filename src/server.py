@@ -706,9 +706,9 @@ def extract_github_event_type(headers: Dict[str, str]) -> str:
     """
     return headers.get('x-github-event', 'unknown')
 
-# Глобальные адаптеры
-bridge_adapter = ClaudeBridgeAdapter(bridge_path=CONFIG["claude_bridge_path"])
-embedding_adapter = EmbeddingAdapter(bridge_path=CONFIG["claude_bridge_path"])
+# Глобальные адаптеры  
+bridge_adapter = ClaudeBridgeAdapter(bridge_path="scripts/claude_voice_bridge.py")
+embedding_adapter = EmbeddingAdapter(bridge_path="scripts/claude_voice_bridge.py")
 github_adapter = GitHubActionAdapter(claude_adapter=bridge_adapter)
 
 # GitHub Integration Endpoints

@@ -5,12 +5,24 @@
 [![Claude Code MAX](https://img.shields.io/badge/Claude-Code%20MAX-orange.svg)](https://claude.ai/code)
 [![OpenAI Compatible](https://img.shields.io/badge/OpenAI-Compatible-green.svg)](https://platform.openai.com/docs/api-reference)
 
-A high-performance OpenAI-compatible API server that provides seamless integration between Claude Code MAX and any OpenAI-compatible client.
+A high-performance OpenAI-compatible API server that provides seamless integration between Claude Code MAX and any OpenAI-compatible client, with built-in GitHub Actions support.
+
+## 🚀 Key Features
+
+- **OpenAI API Compatibility** - Drop-in replacement for OpenAI API
+- **Claude Code MAX** - No API key required, uses local subscription
+- **Real-time Streaming** - Server-sent events for live responses  
+- **Vision Support** - Image analysis capabilities
+- **GitHub Actions Integration** - Full integration with claude-code-action
+- **Webhook Processing** - Secure GitHub webhook handling
+- **PR Analysis** - Automated pull request review and code analysis
+- **Issue Support** - Intelligent issue comment processing
 
 ## Table of Contents
 
 - [Authentication](#authentication)
 - [Quick Start](#quick-start)
+- [GitHub Integration](#github-integration)
 - [API Reference](#api-reference)
 - [Client Integration](#client-integration)
 - [Configuration](#configuration)
@@ -53,6 +65,106 @@ The server starts on `http://localhost:8000` with:
 - Interactive API docs: `/docs`
 - OpenAPI schema: `/openapi.json`
 - Health check: `/health`
+- GitHub integration status: `/github/status`
+
+## GitHub Integration
+
+Full integration with GitHub Actions and claude-code-action for automated code review and assistance.
+
+### Quick Setup
+
+1. **Add GitHub Action to your repository:**
+
+```yaml
+# .github/workflows/claude-assistant.yml
+name: Claude Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request:
+    types: [opened, synchronize]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+jobs:
+  claude-assistant:
+    runs-on: self-hosted
+    
+    if: |
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'issue_comment' && 
+       (contains(github.event.comment.body, '@claude') ||
+        contains(github.event.comment.body, '/review')))
+    
+    steps:
+      - uses: actions/checkout@v4
+        
+      - name: Claude Code Action
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_api_base: 'http://localhost:8000/v1'
+          model: 'claude-3-5-sonnet-20241022'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+2. **Configure environment variables:**
+
+```bash
+# Set webhook secret for security
+export GITHUB_WEBHOOK_SECRET=your_webhook_secret
+
+# Optional: GitHub token for API access
+export GITHUB_TOKEN=ghp_your_token_here
+```
+
+3. **Test the integration:**
+
+Comment `@claude please review this code` on any PR and Claude will analyze and respond!
+
+### Supported Triggers
+
+- `@claude` - Direct mention
+- `@ai` - AI assistant trigger
+- `/review` - Code review request
+- `/analyze` - Code analysis
+- `/help` - General assistance
+- `/fix` - Fix suggestion request
+
+### GitHub API Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/github/webhook` | POST | Process GitHub webhooks |
+| `/github/status` | GET | Integration status |
+| `/github/analyze` | POST | Direct content analysis |
+| `/github/comment` | POST | Post comment to GitHub |
+| `/github/repository/{owner}/{repo}` | GET | Get repository info |
+| `/github/pull/{owner}/{repo}/{pr}` | GET | Get PR details with diff |
+
+### Example: Manual Analysis
+
+```bash
+curl -X POST http://localhost:8000/github/analyze \
+  -H "Content-Type: application/json" \
+  -d '{
+    "event_type": "pull_request_comment",
+    "action": "created",
+    "repository": {
+      "full_name": "myorg/myrepo",
+      "name": "myrepo"
+    },
+    "sender": {"login": "developer"},
+    "content": "@claude review this authentication code for security issues",
+    "pr_number": 42
+  }'
+```
+
+For detailed GitHub integration documentation, see [docs/GITHUB_INTEGRATION.md](docs/GITHUB_INTEGRATION.md).
 
 ## API Reference
 
@@ -217,6 +329,10 @@ const completion = await openai.chat.completions.create({
 | `CLAUDE_CLI_PATH` | Path to Claude CLI | `/Users/laptop/.claude/local/claude` |
 | `SERVER_HOST` | Server host | `0.0.0.0` |
 | `SERVER_PORT` | Server port | `8000` |
+| `GITHUB_WEBHOOK_SECRET` | GitHub webhook secret for signature verification | _(empty)_ |
+| `GITHUB_TOKEN` | GitHub API token for repository access | _(empty)_ |
+| `REQUIRE_WEBHOOK_SIGNATURE` | Require webhook signature verification | `true` |
+| `GITHUB_INTEGRATION_ENABLED` | Enable GitHub integration features | `true` |
 
 ### Supported Models
 
@@ -286,22 +402,37 @@ claude "Hello, Claude!"
 ```
 claude-openai-bridge/
 ├── src/
-│   └── server.py          # Main FastAPI application
-├── tests/                 # Test suite
-├── docs/                  # Additional documentation
-├── requirements.txt       # Python dependencies
-├── .gitignore            # Git ignore rules
-└── README.md             # This file
+│   └── server.py                    # Main FastAPI application
+├── tests/
+│   └── test_github_integration.py   # GitHub integration tests
+├── docs/
+│   └── GITHUB_INTEGRATION.md        # GitHub integration guide
+├── examples/
+│   └── github_integration_examples.py # Usage examples
+├── .github/
+│   └── workflows/
+│       ├── claude-action.yml        # GitHub Action workflow
+│       └── local-integration.yml    # Local testing workflow
+├── requirements.txt                 # Python dependencies
+├── requirements-dev.txt            # Development dependencies
+├── .gitignore                      # Git ignore rules
+└── README.md                       # This file
 ```
 
 ### Running Tests
 
 ```bash
 # Install test dependencies
-pip install pytest httpx
+pip install -r requirements-dev.txt
 
-# Run tests
+# Run all tests
 pytest tests/ -v
+
+# Run GitHub integration tests specifically
+pytest tests/test_github_integration.py -v
+
+# Run examples
+python examples/github_integration_examples.py
 ```
 
 ### API Documentation
