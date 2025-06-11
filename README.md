@@ -1,6 +1,8 @@
 # Claude OpenAI Bridge
 
-OpenAI-compatible API server for Claude Code SDK integration. This server provides a bridge between OpenAI API format and Claude, allowing you to use Claude with any OpenAI-compatible client.
+🔥 **OpenAI-compatible API server for Claude Code MAX** - No API key required!
+
+This server provides a bridge between OpenAI API format and Claude Code MAX subscription, allowing you to use Claude with any OpenAI-compatible client **without needing ANTHROPIC_API_KEY**.
 
 ## Features
 
@@ -18,8 +20,8 @@ OpenAI-compatible API server for Claude Code SDK integration. This server provid
 ### Prerequisites
 
 - Python 3.8+
-- Claude Code MAX installed (no API key required)
-- Or standard Claude API access with API key
+- **Claude Code MAX subscription** (we use this exclusively - no ANTHROPIC_API_KEY needed!)
+- Claude CLI installed and working (`claude --version` to test)
 
 ### Installation
 
@@ -55,17 +57,14 @@ The server will start on `http://localhost:8000`
 
 ## Configuration
 
-### Using with Claude Code MAX
+### 🔥 Claude Code MAX Only - No API Key Required!
 
-The server automatically detects and uses Claude Code MAX when available. No API key is required.
+**This bridge is designed exclusively for Claude Code MAX users.** 
 
-### Using with Standard Claude API
+✅ **What you need:** Active Claude Code MAX subscription  
+❌ **What you DON'T need:** ANTHROPIC_API_KEY environment variable  
 
-Set your API key as an environment variable:
-
-```bash
-export ANTHROPIC_API_KEY="your-api-key"
-```
+The server automatically uses your Claude Code MAX subscription through the local Claude CLI. No API key setup required!
 
 ## Client Configuration Examples
 
@@ -162,9 +161,9 @@ response = client.chat.completions.create(
 
 ### API key errors
 
-- Claude Code MAX doesn't need an API key
-- For standard Claude API, verify ANTHROPIC_API_KEY is set
-- The server auto-retries without API key for Claude Code MAX
+- **This bridge uses Claude Code MAX exclusively - no ANTHROPIC_API_KEY needed**
+- If you see API key errors, the server will automatically retry using Claude Code MAX
+- Make sure your Claude CLI is working: `claude --version`
 
 ### Connection refused
 

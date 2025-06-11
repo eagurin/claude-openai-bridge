@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Claude OpenAI Server - OpenAI-совместимый API для Claude Code SDK
-Автоматическая установка зависимостей через uv и запуск сервера.
+Claude OpenAI Server - OpenAI-compatible API for Claude Code MAX
+NO ANTHROPIC_API_KEY REQUIRED - Uses Claude Code MAX subscription exclusively!
 
 Features:
-- Автоустановка зависимостей через uv
-- OpenAI Chat Completions API совместимость
-- Claude Code SDK backend интеграция
-- Real-time streaming поддержка
-- Vision capabilities (изображения)
-- Computer use поддержка
-- Prompt caching оптимизация
-- Talon Voice bridge интеграция
+- OpenAI Chat Completions API compatibility
+- Claude Code MAX backend integration (no API key needed)
+- Real-time streaming support
+- Vision capabilities (images)
+- Computer use support
+- Prompt caching optimization
+- Works with Cursor, Cline, Roo, and other OpenAI clients
 """
 
 import sys
@@ -42,7 +41,7 @@ logger = logging.getLogger("claude_openai_server")
 
 app = FastAPI(
     title="Claude OpenAI Server",
-    description="OpenAI-совместимый API для Claude Code SDK интеграции",
+    description="OpenAI-compatible API for Claude Code MAX - No API key required!",
     version="2.1.0"
 )
 
@@ -57,8 +56,8 @@ app.add_middleware(
 
 # Конфигурация
 CONFIG: Dict[str, Any] = {
-    "use_claude_cli": True,  # Use claude command directly
-    "claude_bridge_path": str(Path(__file__).parent.parent / "scripts" / "claude_voice_bridge.py"),
+    "use_claude_code_max": True,  # Uses Claude Code MAX subscription exclusively
+    "claude_cli_path": "/Users/laptop/.claude/local/claude",  # Claude CLI path
     "default_model": "claude-3-5-sonnet-20241022",
     "default_embedding_model": "text-embedding-3-small",
     "max_tokens": 8192,
@@ -68,7 +67,8 @@ CONFIG: Dict[str, Any] = {
     "supports_caching": True,
     "supports_embeddings": True,
     "price_per_1k_input": 0.003,
-    "price_per_1k_output": 0.015
+    "price_per_1k_output": 0.015,
+    "no_api_key_required": True  # Claude Code MAX doesn't need ANTHROPIC_API_KEY
 }
 
 # OpenAI API модели
@@ -194,36 +194,20 @@ class ClaudeBridgeAdapter:
     ) -> Dict[str, Any]:
         """Выполняет запрос через Claude CLI"""
         
-        if CONFIG["use_claude_cli"]:
-            # Use claude CLI directly
-            cmd = [
-                "/Users/laptop/.claude/local/claude",  # Full path
-                "-p",  # print mode
-                prompt
-            ]
+        # Use Claude Code MAX CLI - no API key required!
+        cmd = [
+            CONFIG["claude_cli_path"],  # Claude CLI path
+            "-p",  # print mode
+            prompt
+        ]
             
-            # Add system prompt if exists
-            system_messages = [msg for msg in request.messages if msg.role == "system"]
-            if system_messages:
-                system_text = system_messages[0].content_text
-                if system_text:
-                    cmd.extend(["--system-prompt", system_text])
-        else:
-            # Original bridge path logic
-            cmd = [
-                sys.executable, self.bridge_path,
-                prompt,
-                "--new-session",
-                "--quiet" if not request.stream else "",
-                "--timeout", "180",
-                "--max-turns", "5"
-            ]
-            
-            system_messages = [msg for msg in request.messages if msg.role == "system"]
-            if system_messages:
-                system_prompt = system_messages[0].content
-                if isinstance(system_prompt, str):
-                    cmd.extend(["--system-prompt", system_prompt])
+        
+        # Add system prompt if exists
+        system_messages = [msg for msg in request.messages if msg.role == "system"]
+        if system_messages:
+            system_text = system_messages[0].content_text
+            if system_text:
+                cmd.extend(["--system-prompt", system_text])
         
         # Remove empty strings
         cmd = [arg for arg in cmd if arg]
@@ -247,23 +231,8 @@ class ClaudeBridgeAdapter:
                 logger.error(f"Stderr: {error_msg}")
                 logger.error(f"Stdout: {stdout_msg}")
                 
-                # Check for common errors - Claude Code MAX doesn't need API key
-                if "Invalid API key" in stdout_msg:
-                    # Try without explicit API key for Claude Code MAX
-                    import os
-                    os.environ.pop("ANTHROPIC_API_KEY", None)
-                    # Retry the command
-                    process_retry = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE
-                    )
-                    stdout_retry, stderr_retry = await process_retry.communicate()
-                    if process_retry.returncode == 0:
-                        return {
-                            "response": stdout_retry.decode().strip(),
-                            "metadata": self._parse_metadata(stderr_retry.decode() if stderr_retry else "")
-                        }
+                # Note: We use Claude Code MAX exclusively - no API key retries needed
+                logger.error("Claude Code MAX CLI failed - check your subscription and CLI installation")
                 
                 raise HTTPException(status_code=500, detail=f"Claude error: {error_msg or stdout_msg}")
             
@@ -598,30 +567,15 @@ async def stream_chat_completion(request: ChatCompletionRequest) -> AsyncGenerat
     prompt = await bridge_adapter.process_messages(request.messages)
     
     try:
-        # Build streaming command
-        if CONFIG["use_claude_cli"]:
-            cmd = ["/Users/laptop/.claude/local/claude", prompt]
-            
-            # Add system prompt if exists
-            system_messages = [msg for msg in request.messages if msg.role == "system"]
-            if system_messages:
-                system_text = system_messages[0].content_text
-                if system_text:
-                    cmd.extend(["--system-prompt", system_text])
-        else:
-            cmd = [
-                sys.executable, bridge_adapter.bridge_path,
-                prompt,
-                "--new-session",
-                "--timeout", "180",
-                "--max-turns", "5"
-            ]
-            
-            system_messages = [msg for msg in request.messages if msg.role == "system"]
-            if system_messages:
-                system_prompt = system_messages[0].content
-                if isinstance(system_prompt, str):
-                    cmd.extend(["--system-prompt", system_prompt])
+        # Build streaming command for Claude Code MAX
+        cmd = [CONFIG["claude_cli_path"], prompt]
+        
+        # Add system prompt if exists
+        system_messages = [msg for msg in request.messages if msg.role == "system"]
+        if system_messages:
+            system_text = system_messages[0].content_text
+            if system_text:
+                cmd.extend(["--system-prompt", system_text])
         
         # Запускаем Claude Bridge процесс
         process = await asyncio.create_subprocess_exec(
@@ -748,13 +702,13 @@ async def root() -> Dict[str, Any]:
             "caching": CONFIG["supports_caching"],
             "embeddings": CONFIG["supports_embeddings"],
             "streaming": True,
-            "auto_dependencies": True
+            "claude_code_max_exclusive": True
         },
         "integration": {
-            "talon_voice": True,
-            "claude_code_sdk": True,
+            "claude_code_max": True,
+            "no_api_key_required": CONFIG["no_api_key_required"],
             "cline_roo_cursor": True,
-            "uv_package_manager": True
+            "openai_compatible": True
         }
     }
 
@@ -830,21 +784,20 @@ async def get_model_info(model_id: str) -> Dict[str, Any]:
 def main() -> None:
     """Главная функция запуска сервера"""
     
-    print("🚀 Запуск Claude OpenAI Server...")
-    print("📦 Автоустановка зависимостей через uv: ✅")
-    print("📡 OpenAI-совместимый API для Claude Code SDK")
-    print("🎤 Talon Voice интеграция: ✅")
-    print("🤖 Cline/Roo/Cursor совместимость: ✅")
-    print("👁️ Vision поддержка: ✅")
+    print("🚀 Launching Claude OpenAI Server...")
+    print("🔥 CLAUDE CODE MAX EXCLUSIVE - NO API KEY REQUIRED!")
+    print("📡 OpenAI-compatible API for Claude Code MAX subscription")
+    print("🤖 Cline/Roo/Cursor compatibility: ✅")
+    print("👁️ Vision support: ✅")
     print("💻 Computer use: ✅")
     print("⚡ Streaming: ✅")
     print("🧠 Embeddings API: ✅")
+    print("❌ ANTHROPIC_API_KEY: NOT NEEDED!")
     
-    # Claude Code MAX doesn't require API key
-    print("🔥 Claude Code MAX - No API key required!")
-    print(f"\n🌐 Сервер запустится на: http://localhost:8000")
-    print(f"📚 API документация: http://localhost:8000/docs")
+    print(f"\n🌐 Server will start on: http://localhost:8000")
+    print(f"📚 API docs: http://localhost:8000/docs")
     print(f"❤️ Health check: http://localhost:8000/health")
+    print("\n💡 Make sure your Claude Code MAX subscription is active!")
     
     uvicorn.run(
         app,
